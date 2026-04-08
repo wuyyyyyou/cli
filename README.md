@@ -243,6 +243,51 @@ The `gws-shared` skill includes an `install` block so OpenClaw auto-installs the
 
 </details>
 
+## Anna Executa Plugin
+
+This workspace also ships an Anna Executa wrapper binary named `gws-executa`. It exposes `gws` through Anna's JSON-RPC over stdio protocol so Anna can call a single `run_gws` tool with structured arguments.
+
+Build it from source:
+
+```bash
+cargo build -p google-workspace-cli --bin gws-executa
+```
+
+`gws-executa` expects:
+
+- a credential named `GOOGLE_WORKSPACE_CLI_TOKEN`
+- an `argv` array that contains the `gws` arguments without shell quoting
+- no separately installed `gws` binary is required; the plugin embeds the `gws` runtime internally
+
+Example `invoke` payload:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "invoke",
+  "id": 1,
+  "params": {
+    "tool": "run_gws",
+    "arguments": {
+      "argv": [
+        "drive",
+        "files",
+        "list",
+        "--params",
+        "{\"pageSize\":5}"
+      ]
+    },
+    "context": {
+      "credentials": {
+        "GOOGLE_WORKSPACE_CLI_TOKEN": "ya29..."
+      }
+    }
+  }
+}
+```
+
+At runtime Anna only needs the single `gws-executa` executable. The plugin re-enters its own embedded CLI mode internally, captures the result, and returns it over JSON-RPC.
+
 ## Gemini CLI Extension
 
 1. Authenticate the CLI first:
