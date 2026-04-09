@@ -255,8 +255,9 @@ cargo build -p google-workspace-cli --bin gws-executa
 
 `gws-executa` expects:
 
-- a credential named `GOOGLE_WORKSPACE_CLI_TOKEN`
+- a credential named `GOOGLE_WORKSPACE_CLI_TOKEN` or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`
 - an `argv` array that contains the `gws` arguments without shell quoting
+- an optional `cwd` string used as the file transport temp directory
 - no separately installed `gws` binary is required; the plugin embeds the `gws` runtime internally
 
 Example `invoke` payload:
@@ -275,7 +276,8 @@ Example `invoke` payload:
         "list",
         "--params",
         "{\"pageSize\":5}"
-      ]
+      ],
+      "cwd": "/tmp"
     },
     "context": {
       "credentials": {
@@ -286,7 +288,7 @@ Example `invoke` payload:
 }
 ```
 
-At runtime Anna only needs the single `gws-executa` executable. The plugin re-enters its own embedded CLI mode internally, captures the result, and returns it over JSON-RPC.
+At runtime Anna only needs the single `gws-executa` executable. The plugin re-enters its own embedded CLI mode internally, captures the result, and returns it over JSON-RPC. `run_gws` responses are emitted via file transport, so Anna should read the `__file_transport` pointer to the full JSON-RPC payload.
 
 ## Gemini CLI Extension
 

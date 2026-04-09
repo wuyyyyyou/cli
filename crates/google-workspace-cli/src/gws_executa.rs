@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use chrono::Utc;
@@ -9,8 +9,9 @@ use serde_json::{json, Map, Value};
 
 const MAX_STDIO_MESSAGE_BYTES: usize = 512 * 1024;
 const TOOL_NAME: &str = "run_gws";
-const PLUGIN_NAME: &str = "gws-executa";
+const PLUGIN_NAME: &str = "lym-test-example";
 const TOKEN_CREDENTIAL_NAME: &str = "GOOGLE_WORKSPACE_CLI_TOKEN";
+const CREDENTIALS_FILE_CREDENTIAL_NAME: &str = "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE";
 const INTERNAL_MODE_ARG: &str = "__anna_run_gws_internal";
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +76,19 @@ struct CommandOutput {
     executable: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileTransportMode {
+    Auto,
+    Always,
+}
+
+#[derive(Debug)]
+struct ResponsePlan {
+    response: RpcResponse,
+    file_transport_dir: Option<PathBuf>,
+    file_transport_mode: FileTransportMode,
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -112,25 +126,29 @@ fn run_rpc_server() {
                     continue;
                 }
 
-                let response = match serde_json::from_str::<Value>(trimmed) {
+                let plan = match serde_json::from_str::<Value>(trimmed) {
                     Ok(value) => match serde_json::from_value::<RpcRequest>(value) {
                         Ok(request) => handle_request(request, current_exe.as_deref()),
-                        Err(err) => error_response(
+                        Err(err) => response_plan(error_response(
                             Value::Null,
                             -32600,
                             "Invalid request",
                             Some(json!({ "details": err.to_string() })),
-                        ),
+                        )),
                     },
-                    Err(err) => error_response(
+                    Err(err) => response_plan(error_response(
                         Value::Null,
                         -32700,
                         "Parse error",
                         Some(json!({ "details": err.to_string() })),
-                    ),
+                    )),
                 };
 
-                if let Err(err) = send_response(&response) {
+                if let Err(err) = send_response(
+                    &plan.response,
+                    plan.file_transport_dir.as_deref(),
+                    plan.file_transport_mode,
+                ) {
                     let _ = writeln!(io::stderr(), "failed to send response: {err}");
                     break;
                 }
@@ -143,9 +161,9 @@ fn run_rpc_server() {
     }
 }
 
-fn handle_request(request: RpcRequest, current_exe: Option<&Path>) -> RpcResponse {
+fn handle_request(request: RpcRequest, current_exe: Option<&Path>) -> ResponsePlan {
     if request.jsonrpc != "2.0" || request.method.is_empty() {
-        return error_response(
+        return response_plan(error_response(
             request.id,
             -32600,
             "Invalid request",
@@ -153,12 +171,12 @@ fn handle_request(request: RpcRequest, current_exe: Option<&Path>) -> RpcRespons
                 "expected_jsonrpc": "2.0",
                 "expected_fields": ["jsonrpc", "method", "id"],
             })),
-        );
+        ));
     }
 
     match request.method.as_str() {
-        "describe" => success_response(request.id, manifest()),
-        "health" => success_response(
+        "describe" => response_plan(success_response(request.id, manifest())),
+        "health" => response_plan(success_response(
             request.id,
             json!({
                 "status": "healthy",
@@ -166,64 +184,67 @@ fn handle_request(request: RpcRequest, current_exe: Option<&Path>) -> RpcRespons
                 "version": env!("CARGO_PKG_VERSION"),
                 "tools_count": 1,
             }),
-        ),
+        )),
         "invoke" => handle_invoke(request.id, request.params, current_exe),
-        _ => error_response(
+        _ => response_plan(error_response(
             request.id,
             -32601,
             format!("Method not found: {}", request.method),
             None,
-        ),
+        )),
     }
 }
 
-fn handle_invoke(id: Value, params: Value, current_exe: Option<&Path>) -> RpcResponse {
+fn handle_invoke(id: Value, params: Value, current_exe: Option<&Path>) -> ResponsePlan {
     let params: InvokeParams = match serde_json::from_value(params) {
         Ok(params) => params,
         Err(err) => {
-            return error_response(
+            return response_plan(error_response(
                 id,
                 -32602,
                 "Invalid params",
                 Some(json!({ "details": err.to_string() })),
-            );
+            ));
         }
     };
 
     if params.tool != TOOL_NAME {
-        return error_response(
+        return response_plan(error_response(
             id,
             -32601,
             format!("Unknown tool: {}", params.tool),
             Some(json!({ "available_tools": [TOOL_NAME] })),
-        );
+        ));
     }
 
     let argv = match extract_argv(&params.arguments) {
         Ok(argv) => argv,
-        Err(message) => return error_response(id, -32602, message, None),
+        Err(message) => return response_plan(error_response(id, -32602, message, None)),
     };
 
     let Some(current_exe) = current_exe else {
-        return error_response(
+        return response_plan(error_response(
             id,
             -32603,
             "Failed to resolve current executable path",
             None,
-        );
+        ));
     };
 
-    let token = params
-        .context
-        .credentials
-        .get(TOKEN_CREDENTIAL_NAME)
-        .filter(|value| !value.is_empty())
-        .cloned();
+    let file_transport_dir = match resolve_file_transport_dir(&params.arguments, current_exe) {
+        Ok(path) => path,
+        Err(message) => return response_plan(error_response(id, -32602, message, None)),
+    };
 
-    let output = match execute_embedded_gws(current_exe, &argv, token.as_deref()) {
+    let credential_env = match resolve_credential_env(&params.context.credentials) {
+        Ok(env) => env,
+        Err(message) => return response_plan(error_response(id, -32602, message, None)),
+    };
+
+    let output = match execute_embedded_gws(current_exe, &argv, &credential_env) {
         Ok(output) => output,
         Err(err) => {
-            return error_response(
+            return response_plan(error_response(
                 id,
                 -32603,
                 format!(
@@ -231,24 +252,28 @@ fn handle_invoke(id: Value, params: Value, current_exe: Option<&Path>) -> RpcRes
                     current_exe.display()
                 ),
                 None,
-            );
+            ));
         }
     };
 
-    success_response(
-        id,
-        json!({
-            "success": output.success,
-            "tool": TOOL_NAME,
-            "data": build_tool_data(&output, &argv),
-        }),
-    )
+    ResponsePlan {
+        response: success_response(
+            id,
+            json!({
+                "success": output.success,
+                "tool": TOOL_NAME,
+                "data": build_tool_data(&output, &argv, &credential_env, &file_transport_dir),
+            }),
+        ),
+        file_transport_dir: Some(file_transport_dir),
+        file_transport_mode: FileTransportMode::Always,
+    }
 }
 
 fn manifest() -> Value {
     json!({
         "name": PLUGIN_NAME,
-        "display_name": "Google Workspace CLI",
+        "display_name": PLUGIN_NAME,
         "version": env!("CARGO_PKG_VERSION"),
         "description": "Single-file Anna Executa wrapper with embedded gws runtime.",
         "author": "googleworkspace/cli",
@@ -257,8 +282,15 @@ fn manifest() -> Value {
                 "name": TOKEN_CREDENTIAL_NAME,
                 "display_name": "Google Workspace Access Token",
                 "description": "OAuth2 access token forwarded to the embedded gws runtime as GOOGLE_WORKSPACE_CLI_TOKEN.",
-                "required": true,
+                "required": false,
                 "sensitive": true
+            },
+            {
+                "name": CREDENTIALS_FILE_CREDENTIAL_NAME,
+                "display_name": "Google Workspace Credentials File",
+                "description": "Path to a credentials JSON file forwarded to the embedded gws runtime as GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE.",
+                "required": false,
+                "sensitive": false
             }
         ],
         "tools": [
@@ -272,6 +304,12 @@ fn manifest() -> Value {
                         "items": { "type": "string" },
                         "description": "gws arguments as a string array, for example [\"drive\", \"files\", \"list\", \"--params\", \"{\\\"pageSize\\\":5}\"].",
                         "required": true
+                    },
+                    {
+                        "name": "cwd",
+                        "type": "string",
+                        "description": "Optional existing directory used for file transport temporary files. Defaults to the plugin binary directory.",
+                        "required": false
                     }
                 ]
             }
@@ -309,6 +347,16 @@ fn extract_argv(arguments: &Map<String, Value>) -> Result<Vec<String>, String> {
     Ok(argv)
 }
 
+fn extract_cwd(arguments: &Map<String, Value>) -> Result<Option<&str>, String> {
+    match arguments.get("cwd") {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| "cwd must be a string when provided".to_string()),
+    }
+}
+
 fn validate_command_arg(arg: &str) -> Result<(), String> {
     if arg == INTERNAL_MODE_ARG {
         return Err("Reserved internal command argument is not allowed".to_string());
@@ -319,6 +367,56 @@ fn validate_command_arg(arg: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn resolve_file_transport_dir(arguments: &Map<String, Value>, current_exe: &Path) -> Result<PathBuf, String> {
+    if let Some(raw_cwd) = extract_cwd(arguments)? {
+        let path = PathBuf::from(raw_cwd);
+        if !path.exists() {
+            return Err(format!("cwd does not exist: {}", path.display()));
+        }
+        if !path.is_dir() {
+            return Err(format!("cwd is not a directory: {}", path.display()));
+        }
+        return Ok(path);
+    }
+
+    current_exe
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "Failed to determine plugin binary directory".to_string())
+}
+
+fn resolve_credential_env(
+    credentials: &HashMap<String, String>,
+) -> Result<HashMap<&'static str, String>, String> {
+    let mut env = HashMap::new();
+
+    if let Some(token) = credentials
+        .get(TOKEN_CREDENTIAL_NAME)
+        .filter(|value| !value.trim().is_empty())
+    {
+        env.insert(TOKEN_CREDENTIAL_NAME, token.clone());
+    }
+
+    if let Some(path) = credentials
+        .get(CREDENTIALS_FILE_CREDENTIAL_NAME)
+        .filter(|value| !value.trim().is_empty())
+    {
+        env.insert(CREDENTIALS_FILE_CREDENTIAL_NAME, path.clone());
+    }
+
+    if env.is_empty()
+        && std::env::var_os(TOKEN_CREDENTIAL_NAME).is_none()
+        && std::env::var_os(CREDENTIALS_FILE_CREDENTIAL_NAME).is_none()
+    {
+        return Err(format!(
+            "One of '{}' or '{}' must be provided in context.credentials or environment",
+            TOKEN_CREDENTIAL_NAME, CREDENTIALS_FILE_CREDENTIAL_NAME
+        ));
+    }
+
+    Ok(env)
 }
 
 fn is_internal_cli_mode(args: &[String]) -> bool {
@@ -334,9 +432,9 @@ fn internal_cli_args(plugin_args: &[String]) -> Vec<String> {
 fn execute_embedded_gws(
     current_exe: &Path,
     argv: &[String],
-    token: Option<&str>,
+    credential_env: &HashMap<&'static str, String>,
 ) -> io::Result<CommandOutput> {
-    let mut command = build_embedded_gws_command(current_exe, argv, token);
+    let mut command = build_embedded_gws_command(current_exe, argv, credential_env);
     let output = command.output()?;
     Ok(CommandOutput {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -347,7 +445,11 @@ fn execute_embedded_gws(
     })
 }
 
-fn build_embedded_gws_command(current_exe: &Path, argv: &[String], token: Option<&str>) -> Command {
+fn build_embedded_gws_command(
+    current_exe: &Path,
+    argv: &[String],
+    credential_env: &HashMap<&'static str, String>,
+) -> Command {
     let mut command = Command::new(current_exe);
     command
         .arg(INTERNAL_MODE_ARG)
@@ -356,19 +458,35 @@ fn build_embedded_gws_command(current_exe: &Path, argv: &[String], token: Option
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    if let Some(token) = token {
-        command.env(TOKEN_CREDENTIAL_NAME, token);
+    for (key, value) in credential_env {
+        command.env(key, value);
     }
 
     command
 }
 
-fn build_tool_data(output: &CommandOutput, argv: &[String]) -> Value {
+fn build_tool_data(
+    output: &CommandOutput,
+    argv: &[String],
+    credential_env: &HashMap<&'static str, String>,
+    file_transport_dir: &Path,
+) -> Value {
+    let mut credential_sources: Vec<&str> = credential_env.keys().copied().collect();
+    credential_sources.sort_unstable();
+
     let mut data = Map::new();
     data.insert("argv".to_string(), json!(argv));
     data.insert(
         "plugin_executable".to_string(),
         Value::String(output.executable.clone()),
+    );
+    data.insert(
+        "file_transport_dir".to_string(),
+        Value::String(file_transport_dir.display().to_string()),
+    );
+    data.insert(
+        "credential_sources".to_string(),
+        json!(credential_sources),
     );
     data.insert("stdout".to_string(), Value::String(output.stdout.clone()));
     data.insert("stderr".to_string(), Value::String(output.stderr.clone()));
@@ -382,16 +500,31 @@ fn build_tool_data(output: &CommandOutput, argv: &[String]) -> Value {
     Value::Object(data)
 }
 
-fn send_response(response: &RpcResponse) -> io::Result<()> {
+fn send_response(
+    response: &RpcResponse,
+    file_transport_dir: Option<&Path>,
+    file_transport_mode: FileTransportMode,
+) -> io::Result<()> {
     let payload = encode_json(response)?;
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
 
-    if payload.len() > MAX_STDIO_MESSAGE_BYTES {
+    let should_use_file_transport = match file_transport_mode {
+        FileTransportMode::Always => true,
+        FileTransportMode::Auto => payload.len() > MAX_STDIO_MESSAGE_BYTES,
+    };
+
+    if should_use_file_transport {
+        let dir = file_transport_dir.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "file transport directory is required when file transport is enabled",
+            )
+        })?;
         let mut temp = tempfile::Builder::new()
             .prefix("executa-resp-")
             .suffix(".json")
-            .tempfile()?;
+            .tempfile_in(dir)?;
         temp.write_all(&payload)?;
         let (_file, path) = temp.keep().map_err(|err| err.error)?;
         let pointer = FileTransportPointer {
@@ -407,6 +540,14 @@ fn send_response(response: &RpcResponse) -> io::Result<()> {
 
     stdout.write_all(b"\n")?;
     stdout.flush()
+}
+
+fn response_plan(response: RpcResponse) -> ResponsePlan {
+    ResponsePlan {
+        response,
+        file_transport_dir: None,
+        file_transport_mode: FileTransportMode::Auto,
+    }
 }
 
 fn encode_json<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
@@ -440,9 +581,11 @@ mod tests {
     use super::*;
 
     use std::ffi::OsStr;
+    use std::fs;
     use std::path::PathBuf;
 
     use serde_json::json;
+    use tempfile::tempdir;
 
     #[test]
     fn extract_argv_strips_leading_gws() {
@@ -497,7 +640,8 @@ mod tests {
     fn build_embedded_command_uses_current_exe_and_token() {
         let current_exe = PathBuf::from("/tmp/gws-executa");
         let argv = vec!["drive".to_string(), "files".to_string()];
-        let command = build_embedded_gws_command(&current_exe, &argv, Some("token-123"));
+        let credential_env = HashMap::from([(TOKEN_CREDENTIAL_NAME, "token-123".to_string())]);
+        let command = build_embedded_gws_command(&current_exe, &argv, &credential_env);
 
         assert_eq!(command.get_program(), current_exe.as_os_str());
         assert_eq!(
@@ -519,6 +663,7 @@ mod tests {
 
     #[test]
     fn build_tool_data_parses_json_stdout() {
+        let credential_env = HashMap::from([(TOKEN_CREDENTIAL_NAME, "token-123".to_string())]);
         let output = CommandOutput {
             stdout: "{\"files\":[]}".to_string(),
             stderr: "warning".to_string(),
@@ -527,10 +672,16 @@ mod tests {
             executable: "gws-executa".to_string(),
         };
 
-        let data = build_tool_data(&output, &["drive".to_string()]);
+        let data = build_tool_data(
+            &output,
+            &["drive".to_string()],
+            &credential_env,
+            Path::new("/tmp"),
+        );
         assert_eq!(data["stdout_json"]["files"], json!([]));
         assert_eq!(data["exit_code"], json!(0));
         assert_eq!(data["embedded_cli"], json!(true));
+        assert_eq!(data["credential_sources"], json!([TOKEN_CREDENTIAL_NAME]));
     }
 
     #[test]
@@ -544,7 +695,7 @@ mod tests {
             Some(Path::new("/tmp/gws-executa")),
         );
 
-        assert_eq!(response.error.unwrap().code, -32601);
+        assert_eq!(response.response.error.unwrap().code, -32601);
     }
 
     #[test]
@@ -558,6 +709,56 @@ mod tests {
             None,
         );
 
-        assert_eq!(response.error.unwrap().code, -32603);
+        assert_eq!(response.response.error.unwrap().code, -32603);
+    }
+
+    #[test]
+    fn resolve_credential_env_accepts_credentials_file_only() {
+        let credentials = HashMap::from([(
+            CREDENTIALS_FILE_CREDENTIAL_NAME.to_string(),
+            "/tmp/creds.json".to_string(),
+        )]);
+
+        let env = resolve_credential_env(&credentials).unwrap();
+        assert_eq!(
+            env.get(CREDENTIALS_FILE_CREDENTIAL_NAME),
+            Some(&"/tmp/creds.json".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_credential_env_requires_one_credential_source() {
+        std::env::remove_var(TOKEN_CREDENTIAL_NAME);
+        std::env::remove_var(CREDENTIALS_FILE_CREDENTIAL_NAME);
+
+        let err = resolve_credential_env(&HashMap::new()).unwrap_err();
+        assert!(err.contains(TOKEN_CREDENTIAL_NAME));
+        assert!(err.contains(CREDENTIALS_FILE_CREDENTIAL_NAME));
+    }
+
+    #[test]
+    fn resolve_file_transport_dir_uses_cwd_argument() {
+        let dir = tempdir().unwrap();
+        let arguments = serde_json::from_value::<Map<String, Value>>(json!({
+            "argv": ["--version"],
+            "cwd": dir.path().to_string_lossy()
+        }))
+        .unwrap();
+
+        let resolved = resolve_file_transport_dir(&arguments, Path::new("/tmp/gws-executa")).unwrap();
+        assert_eq!(resolved, dir.path());
+    }
+
+    #[test]
+    fn send_response_always_uses_file_transport_when_requested() {
+        let dir = tempdir().unwrap();
+        let response = success_response(json!(1), json!({"ok": true}));
+
+        send_response(&response, Some(dir.path()), FileTransportMode::Always).unwrap();
+
+        let entries = fs::read_dir(dir.path()).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(entries.len(), 1);
+        let content = fs::read_to_string(entries[0].path()).unwrap();
+        assert!(content.contains("\"jsonrpc\":\"2.0\""));
     }
 }

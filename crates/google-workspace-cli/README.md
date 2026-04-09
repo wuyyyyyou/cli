@@ -28,6 +28,8 @@ gws gmail users.messages list --params '{"maxResults": 3}'
 
 See the [full README](https://github.com/googleworkspace/cli#readme) for authentication setup, helper commands, agent skills, and more.
 
+For the embedded Anna Executa plugin binary, see [EXECUTA.md](./EXECUTA.md).
+
 ## License
 
 Apache-2.0 — see [LICENSE](https://github.com/googleworkspace/cli/blob/main/LICENSE).
