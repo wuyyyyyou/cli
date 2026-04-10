@@ -9,7 +9,7 @@ use serde_json::{json, Map, Value};
 
 const MAX_STDIO_MESSAGE_BYTES: usize = 512 * 1024;
 const TOOL_NAME: &str = "run_gws";
-const PLUGIN_NAME: &str = "lym-test-example";
+const PLUGIN_NAME: &str = "gws-executa";
 const TOKEN_CREDENTIAL_NAME: &str = "GOOGLE_WORKSPACE_CLI_TOKEN";
 const CREDENTIALS_FILE_CREDENTIAL_NAME: &str = "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE";
 const INTERNAL_MODE_ARG: &str = "__anna_run_gws_internal";
@@ -256,15 +256,22 @@ fn handle_invoke(id: Value, params: Value, current_exe: Option<&Path>) -> Respon
         }
     };
 
-    ResponsePlan {
-        response: success_response(
+    let tool_data = build_tool_data(&output, &argv, &credential_env, &file_transport_dir);
+    let response = if output.success {
+        success_response(
             id,
             json!({
-                "success": output.success,
+                "success": true,
                 "tool": TOOL_NAME,
-                "data": build_tool_data(&output, &argv, &credential_env, &file_transport_dir),
+                "data": tool_data,
             }),
-        ),
+        )
+    } else {
+        build_gws_failure_response(id, &output, tool_data)
+    };
+
+    ResponsePlan {
+        response,
         file_transport_dir: Some(file_transport_dir),
         file_transport_mode: FileTransportMode::Always,
     }
@@ -500,6 +507,49 @@ fn build_tool_data(
     Value::Object(data)
 }
 
+fn build_gws_failure_response(id: Value, output: &CommandOutput, tool_data: Value) -> RpcResponse {
+    let stdout_json = serde_json::from_str::<Value>(output.stdout.trim()).ok();
+    let gws_message = stdout_json
+        .as_ref()
+        .and_then(|json| json.get("error"))
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let stderr = output.stderr.trim();
+            if stderr.is_empty() {
+                None
+            } else {
+                Some(stderr.to_string())
+            }
+        })
+        .unwrap_or_else(|| "gws command failed".to_string());
+
+    let reason = stdout_json
+        .as_ref()
+        .and_then(|json| json.get("error"))
+        .and_then(|error| error.get("reason"))
+        .and_then(Value::as_str);
+
+    let code = match reason {
+        Some("validationError") => -32602,
+        _ => -32603,
+    };
+
+    error_response(
+        id,
+        code,
+        gws_message,
+        Some(json!({
+            "tool": TOOL_NAME,
+            "gws_exit_code": output.exit_code,
+            "reason": reason,
+            "tool_data": tool_data,
+        })),
+    )
+}
+
 fn send_response(
     response: &RpcResponse,
     file_transport_dir: Option<&Path>,
@@ -710,6 +760,32 @@ mod tests {
         );
 
         assert_eq!(response.response.error.unwrap().code, -32603);
+    }
+
+    #[test]
+    fn build_gws_failure_response_uses_validation_error_shape() {
+        let output = CommandOutput {
+            stdout: "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"error: unrecognized subcommand 'usrs'\",\n    \"reason\": \"validationError\"\n  }\n}\n".to_string(),
+            stderr: "error[validation]: error: unrecognized subcommand 'usrs'\n".to_string(),
+            exit_code: 3,
+            success: false,
+            executable: "gws-executa".to_string(),
+        };
+
+        let response = build_gws_failure_response(
+            json!(5),
+            &output,
+            json!({
+                "argv": ["gmail", "usrs"],
+                "exit_code": 3
+            }),
+        );
+
+        let error = response.error.expect("expected top-level error");
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("unrecognized subcommand"));
+        assert_eq!(response.result, None);
+        assert_eq!(error.data.unwrap()["tool"], json!(TOOL_NAME));
     }
 
     #[test]

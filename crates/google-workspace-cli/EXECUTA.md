@@ -223,6 +223,6 @@ rm -f $FILE
 
 - `run_gws` 的完整响应不在 stdout，而是在 `__file_transport` 指向的临时文件里。
 - `context.credentials` 里可以传 `GOOGLE_WORKSPACE_CLI_TOKEN` 或 `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`，两者至少提供一个。
-- `success: false` 且 `exit_code != 0` 表示插件本身调用成功，但内部嵌入的 `gws` 命令执行失败。
-- 调试时优先看 `result.data.stderr` 和 `result.data.stdout_json`。
+- `run_gws` 执行成功时返回顶层 `result`；执行失败时返回顶层 `error`，符合 Executa JSON-RPC 约定。
+- 调试失败时优先看 `error.data.tool_data.stderr` 和 `error.data.tool_data.stdout_json`。
 - 如果你看到一连串 parse error，通常说明传入的是多行 JSON，而不是单行 JSON-RPC 消息。

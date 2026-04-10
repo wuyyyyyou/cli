@@ -155,7 +155,7 @@ run_protocol_tests() {
         echo -e "${RED}invoke test failed${NC}"
         exit 1
     fi
-    echo -e "  ${GREEN}✓ invoke (--version, file transport)${NC}"
+    echo -e "  ${GREEN}✓ invoke (--version, file transport success path)${NC}"
 }
 
 mkdir -p "$DIST_DIR"
