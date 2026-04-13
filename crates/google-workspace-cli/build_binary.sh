@@ -189,8 +189,8 @@ else
     TARGETS=("$HOST_TRIPLE")
 fi
 
-declare -a BUILT_OUTPUTS
-declare -a FAILED_TARGETS
+declare -a BUILT_OUTPUTS=()
+declare -a FAILED_TARGETS=()
 
 for target in "${TARGETS[@]}"; do
     platform_key="$(platform_key_from_triple "$target")"
@@ -214,7 +214,7 @@ for artifact in "${BUILT_OUTPUTS[@]}"; do
     echo -e "  ${CYAN}•${NC} ${artifact} (${size})"
 done
 
-if [[ "${#FAILED_TARGETS[@]}" -gt 0 ]]; then
+if [[ ${#FAILED_TARGETS[@]} -gt 0 ]]; then
     echo ""
     echo -e "${YELLOW}Some targets failed to build.${NC}"
     for failed in "${FAILED_TARGETS[@]}"; do
