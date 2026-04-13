@@ -123,6 +123,7 @@ jobs:
       - name: Create or update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_NAME: ${{ inputs.release_name }}
           RELEASE_PRERELEASE: ${{ inputs.prerelease }}
@@ -149,10 +150,11 @@ jobs:
             printf '%s\n' 'SHA-256 checksum files are uploaded alongside each archive.'
           } > "$notes_file"
 
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" artifacts/* --clobber
+          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" artifacts/* --clobber --repo "$GH_REPO"
           else
             gh release create "$RELEASE_TAG" \
+              --repo "$GH_REPO" \
               --target "$TARGET_SHA" \
               --title "$title" \
               --notes-file "$notes_file" \
