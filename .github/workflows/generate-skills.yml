@@ -15,12 +15,7 @@
 name: Generate Skills
 
 on:
-  schedule:
-    - cron: "0 * * * *" # Hourly — keeps skills in sync with Discovery API changes
   workflow_dispatch: # Manual trigger
-  push:
-    branches-ignore:
-      - main # main is kept up to date by PR merges
 
 concurrency:
   group: generate-skills-${{ github.ref_name }}

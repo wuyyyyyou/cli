@@ -1,18 +1,6 @@
 name: Publish OpenClaw Skills
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "skills/**"
-      - ".github/workflows/publish-skills.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "skills/**"
-      - ".github/workflows/publish-skills.yml"
-  schedule:
-    - cron: "0 * * * *" # Hourly, to drip-publish past rate limits
   workflow_dispatch:
 
 concurrency:

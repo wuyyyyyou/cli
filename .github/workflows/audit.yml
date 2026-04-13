@@ -15,14 +15,6 @@
 name: Audit
 
 on:
-  push:
-    branches: [main]
-    paths: ['Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml']
-  pull_request:
-    branches: [main]
-    paths: ['Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml']
-  schedule:
-    - cron: '0 6 * * *' # Daily at 06:00 UTC
   workflow_dispatch:
 
 concurrency:
