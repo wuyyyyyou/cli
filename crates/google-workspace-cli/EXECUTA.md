@@ -226,3 +226,17 @@ rm -f $FILE
 - `run_gws` 执行成功时返回顶层 `result`；执行失败时返回顶层 `error`，符合 Executa JSON-RPC 约定。
 - 调试失败时优先看 `error.data.tool_data.stderr` 和 `error.data.tool_data.stdout_json`。
 - 如果你看到一连串 parse error，通常说明传入的是多行 JSON，而不是单行 JSON-RPC 消息。
+
+## token导出
+
+```shell
+gws auth setup
+gws auth login
+gws auth export --unmasked > credentials.json
+```
+
+* scopes 至少要包含：
+  * auth/gmail.send
+  * auth/gmail.modify
+  * auth/gmail.compose
+  * auth/gmail.readonly	
