@@ -141,7 +141,7 @@ run_protocol_tests() {
     echo -e "  ${GREEN}✓ health${NC}"
 
     local invoke_pointer
-    invoke_pointer="$(echo '{"jsonrpc":"2.0","method":"invoke","id":3,"params":{"tool":"run_gws","arguments":{"argv":["--version"]},"context":{"credentials":{"GOOGLE_WORKSPACE_CLI_TOKEN":"dummy-token"}}}}' | "$binary" 2>/dev/null)"
+    invoke_pointer="$(echo '{"jsonrpc":"2.0","method":"invoke","id":3,"params":{"tool":"run_gws","arguments":{"argv":["--version"]},"context":{"credentials":{"GOOGLE_ACCESS_TOKEN":"dummy-token"}}}}' | "$binary" 2>/dev/null)"
     local invoke_file
     invoke_file="$(echo "$invoke_pointer" | jq -r '."__file_transport"')"
     if [[ -z "$invoke_file" || "$invoke_file" == "null" || ! -f "$invoke_file" ]]; then

@@ -65,7 +65,7 @@ echo '{"jsonrpc":"2.0","method":"health","id":2}' | "$BIN" | jq .
 调用 `--version`：
 
 ```bash
-PTR=$(echo '{"jsonrpc":"2.0","method":"invoke","id":3,"params":{"tool":"run_gws","arguments":{"argv":["--version"]},"context":{"credentials":{"GOOGLE_WORKSPACE_CLI_TOKEN":"dummy-token"}}}}' | "$BIN")
+PTR=$(echo '{"jsonrpc":"2.0","method":"invoke","id":3,"params":{"tool":"run_gws","arguments":{"argv":["--version"]},"context":{"credentials":{"GOOGLE_ACCESS_TOKEN":"dummy-token"}}}}' | "$BIN")
 FILE=$(echo "$PTR" | jq -r '."__file_transport"')
 cat "$FILE" | jq .
 rm -f "$FILE"
@@ -74,7 +74,7 @@ rm -f "$FILE"
 调用 `--help`：
 
 ```bash
-PTR=$(echo '{"jsonrpc":"2.0","method":"invoke","id":4,"params":{"tool":"run_gws","arguments":{"argv":["--help"]},"context":{"credentials":{"GOOGLE_WORKSPACE_CLI_TOKEN":"dummy-token"}}}}' | "$BIN")
+PTR=$(echo '{"jsonrpc":"2.0","method":"invoke","id":4,"params":{"tool":"run_gws","arguments":{"argv":["--help"]},"context":{"credentials":{"GOOGLE_ACCESS_TOKEN":"dummy-token"}}}}' | "$BIN")
 FILE=$(echo "$PTR" | jq -r '."__file_transport"')
 cat "$FILE" | jq .
 rm -f "$FILE"
@@ -101,7 +101,7 @@ PTR=$(jq -c -n --arg token "$TOKEN" '{
     },
     context: {
       credentials: {
-        GOOGLE_WORKSPACE_CLI_TOKEN: $token
+        GOOGLE_ACCESS_TOKEN: $token
       }
     }
   }
@@ -125,7 +125,7 @@ PTR=$(jq -c -n --arg token "$TOKEN" '{
     },
     context: {
       credentials: {
-        GOOGLE_WORKSPACE_CLI_TOKEN: $token
+        GOOGLE_ACCESS_TOKEN: $token
       }
     }
   }
@@ -188,7 +188,7 @@ echo '{"jsonrpc":"2.0","method":"health","id":2}' | $BIN | jq .
 调用 `--version`：
 
 ```fish
-set PTR (echo '{"jsonrpc":"2.0","method":"invoke","id":3,"params":{"tool":"run_gws","arguments":{"argv":["--version"]},"context":{"credentials":{"GOOGLE_WORKSPACE_CLI_TOKEN":"dummy-token"}}}}' | $BIN)
+set PTR (echo '{"jsonrpc":"2.0","method":"invoke","id":3,"params":{"tool":"run_gws","arguments":{"argv":["--version"]},"context":{"credentials":{"GOOGLE_ACCESS_TOKEN":"dummy-token"}}}}' | $BIN)
 set FILE (echo $PTR | jq -r '."__file_transport"')
 cat $FILE | jq .
 rm -f $FILE
@@ -209,7 +209,7 @@ set PTR (jq -c -n --arg token "$TOKEN" '{
     },
     context: {
       credentials: {
-        GOOGLE_WORKSPACE_CLI_TOKEN: $token
+        GOOGLE_ACCESS_TOKEN: $token
       }
     }
   }
@@ -222,7 +222,7 @@ rm -f $FILE
 ## 说明
 
 - `run_gws` 的完整响应不在 stdout，而是在 `__file_transport` 指向的临时文件里。
-- `context.credentials` 里可以传 `GOOGLE_WORKSPACE_CLI_TOKEN` 或 `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`，两者至少提供一个。
+- `context.credentials` 里可以传 `GOOGLE_ACCESS_TOKEN` 或 `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`，两者至少提供一个。
 - `run_gws` 执行成功时返回顶层 `result`；执行失败时返回顶层 `error`，符合 Executa JSON-RPC 约定。
 - 调试失败时优先看 `error.data.tool_data.stderr` 和 `error.data.tool_data.stdout_json`。
 - 如果你看到一连串 parse error，通常说明传入的是多行 JSON，而不是单行 JSON-RPC 消息。

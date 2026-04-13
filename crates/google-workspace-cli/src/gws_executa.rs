@@ -10,7 +10,8 @@ use serde_json::{json, Map, Value};
 const MAX_STDIO_MESSAGE_BYTES: usize = 512 * 1024;
 const TOOL_NAME: &str = "run_gws";
 const PLUGIN_NAME: &str = "gws-executa";
-const TOKEN_CREDENTIAL_NAME: &str = "GOOGLE_WORKSPACE_CLI_TOKEN";
+const TOKEN_CREDENTIAL_NAME: &str = "GOOGLE_ACCESS_TOKEN";
+const INTERNAL_GWS_TOKEN_ENV: &str = "GOOGLE_WORKSPACE_CLI_TOKEN";
 const CREDENTIALS_FILE_CREDENTIAL_NAME: &str = "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE";
 const INTERNAL_MODE_ARG: &str = "__anna_run_gws_internal";
 
@@ -87,6 +88,12 @@ struct ResponsePlan {
     response: RpcResponse,
     file_transport_dir: Option<PathBuf>,
     file_transport_mode: FileTransportMode,
+}
+
+#[derive(Debug, Default)]
+struct ResolvedCredentials {
+    env: HashMap<&'static str, String>,
+    sources: Vec<&'static str>,
 }
 
 #[tokio::main]
@@ -236,12 +243,12 @@ fn handle_invoke(id: Value, params: Value, current_exe: Option<&Path>) -> Respon
         Err(message) => return response_plan(error_response(id, -32602, message, None)),
     };
 
-    let credential_env = match resolve_credential_env(&params.context.credentials) {
-        Ok(env) => env,
+    let resolved_credentials = match resolve_credential_env(&params.context.credentials) {
+        Ok(credentials) => credentials,
         Err(message) => return response_plan(error_response(id, -32602, message, None)),
     };
 
-    let output = match execute_embedded_gws(current_exe, &argv, &credential_env) {
+    let output = match execute_embedded_gws(current_exe, &argv, &resolved_credentials.env) {
         Ok(output) => output,
         Err(err) => {
             return response_plan(error_response(
@@ -256,7 +263,7 @@ fn handle_invoke(id: Value, params: Value, current_exe: Option<&Path>) -> Respon
         }
     };
 
-    let tool_data = build_tool_data(&output, &argv, &credential_env, &file_transport_dir);
+    let tool_data = build_tool_data(&output, &argv, &resolved_credentials, &file_transport_dir);
     let response = if output.success {
         success_response(
             id,
@@ -287,8 +294,8 @@ fn manifest() -> Value {
         "credentials": [
             {
                 "name": TOKEN_CREDENTIAL_NAME,
-                "display_name": "Google Workspace Access Token",
-                "description": "OAuth2 access token forwarded to the embedded gws runtime as GOOGLE_WORKSPACE_CLI_TOKEN.",
+                "display_name": "Google Access Token",
+                "description": "OAuth2 access token injected by Anna. The plugin forwards it to the embedded gws runtime as GOOGLE_WORKSPACE_CLI_TOKEN.",
                 "required": false,
                 "sensitive": true
             },
@@ -396,25 +403,29 @@ fn resolve_file_transport_dir(arguments: &Map<String, Value>, current_exe: &Path
 
 fn resolve_credential_env(
     credentials: &HashMap<String, String>,
-) -> Result<HashMap<&'static str, String>, String> {
-    let mut env = HashMap::new();
+) -> Result<ResolvedCredentials, String> {
+    let mut resolved = ResolvedCredentials::default();
 
     if let Some(token) = credentials
         .get(TOKEN_CREDENTIAL_NAME)
         .filter(|value| !value.trim().is_empty())
     {
-        env.insert(TOKEN_CREDENTIAL_NAME, token.clone());
+        resolved.env.insert(INTERNAL_GWS_TOKEN_ENV, token.clone());
+        resolved.sources.push(TOKEN_CREDENTIAL_NAME);
     }
 
     if let Some(path) = credentials
         .get(CREDENTIALS_FILE_CREDENTIAL_NAME)
         .filter(|value| !value.trim().is_empty())
     {
-        env.insert(CREDENTIALS_FILE_CREDENTIAL_NAME, path.clone());
+        resolved
+            .env
+            .insert(CREDENTIALS_FILE_CREDENTIAL_NAME, path.clone());
+        resolved.sources.push(CREDENTIALS_FILE_CREDENTIAL_NAME);
     }
 
-    if env.is_empty()
-        && std::env::var_os(TOKEN_CREDENTIAL_NAME).is_none()
+    if resolved.env.is_empty()
+        && std::env::var_os(INTERNAL_GWS_TOKEN_ENV).is_none()
         && std::env::var_os(CREDENTIALS_FILE_CREDENTIAL_NAME).is_none()
     {
         return Err(format!(
@@ -423,7 +434,8 @@ fn resolve_credential_env(
         ));
     }
 
-    Ok(env)
+    resolved.sources.sort_unstable();
+    Ok(resolved)
 }
 
 fn is_internal_cli_mode(args: &[String]) -> bool {
@@ -475,12 +487,9 @@ fn build_embedded_gws_command(
 fn build_tool_data(
     output: &CommandOutput,
     argv: &[String],
-    credential_env: &HashMap<&'static str, String>,
+    resolved_credentials: &ResolvedCredentials,
     file_transport_dir: &Path,
 ) -> Value {
-    let mut credential_sources: Vec<&str> = credential_env.keys().copied().collect();
-    credential_sources.sort_unstable();
-
     let mut data = Map::new();
     data.insert("argv".to_string(), json!(argv));
     data.insert(
@@ -493,7 +502,7 @@ fn build_tool_data(
     );
     data.insert(
         "credential_sources".to_string(),
-        json!(credential_sources),
+        json!(resolved_credentials.sources),
     );
     data.insert("stdout".to_string(), Value::String(output.stdout.clone()));
     data.insert("stderr".to_string(), Value::String(output.stderr.clone()));
@@ -690,7 +699,7 @@ mod tests {
     fn build_embedded_command_uses_current_exe_and_token() {
         let current_exe = PathBuf::from("/tmp/gws-executa");
         let argv = vec!["drive".to_string(), "files".to_string()];
-        let credential_env = HashMap::from([(TOKEN_CREDENTIAL_NAME, "token-123".to_string())]);
+        let credential_env = HashMap::from([(INTERNAL_GWS_TOKEN_ENV, "token-123".to_string())]);
         let command = build_embedded_gws_command(&current_exe, &argv, &credential_env);
 
         assert_eq!(command.get_program(), current_exe.as_os_str());
@@ -704,7 +713,7 @@ mod tests {
         assert_eq!(
             command
                 .get_envs()
-                .find(|(key, _)| *key == OsStr::new(TOKEN_CREDENTIAL_NAME))
+                .find(|(key, _)| *key == OsStr::new(INTERNAL_GWS_TOKEN_ENV))
                 .and_then(|(_, value)| value)
                 .map(|value| value.to_string_lossy().to_string()),
             Some("token-123".to_string())
@@ -713,7 +722,10 @@ mod tests {
 
     #[test]
     fn build_tool_data_parses_json_stdout() {
-        let credential_env = HashMap::from([(TOKEN_CREDENTIAL_NAME, "token-123".to_string())]);
+        let resolved_credentials = ResolvedCredentials {
+            env: HashMap::from([(INTERNAL_GWS_TOKEN_ENV, "token-123".to_string())]),
+            sources: vec![TOKEN_CREDENTIAL_NAME],
+        };
         let output = CommandOutput {
             stdout: "{\"files\":[]}".to_string(),
             stderr: "warning".to_string(),
@@ -725,7 +737,7 @@ mod tests {
         let data = build_tool_data(
             &output,
             &["drive".to_string()],
-            &credential_env,
+            &resolved_credentials,
             Path::new("/tmp"),
         );
         assert_eq!(data["stdout_json"]["files"], json!([]));
@@ -797,14 +809,27 @@ mod tests {
 
         let env = resolve_credential_env(&credentials).unwrap();
         assert_eq!(
-            env.get(CREDENTIALS_FILE_CREDENTIAL_NAME),
+            env.env.get(CREDENTIALS_FILE_CREDENTIAL_NAME),
             Some(&"/tmp/creds.json".to_string())
         );
+        assert_eq!(env.sources, vec![CREDENTIALS_FILE_CREDENTIAL_NAME]);
+    }
+
+    #[test]
+    fn resolve_credential_env_maps_google_access_token_to_internal_gws_env() {
+        let credentials = HashMap::from([(TOKEN_CREDENTIAL_NAME.to_string(), "token-123".to_string())]);
+
+        let env = resolve_credential_env(&credentials).unwrap();
+        assert_eq!(
+            env.env.get(INTERNAL_GWS_TOKEN_ENV),
+            Some(&"token-123".to_string())
+        );
+        assert_eq!(env.sources, vec![TOKEN_CREDENTIAL_NAME]);
     }
 
     #[test]
     fn resolve_credential_env_requires_one_credential_source() {
-        std::env::remove_var(TOKEN_CREDENTIAL_NAME);
+        std::env::remove_var(INTERNAL_GWS_TOKEN_ENV);
         std::env::remove_var(CREDENTIALS_FILE_CREDENTIAL_NAME);
 
         let err = resolve_credential_env(&HashMap::new()).unwrap_err();

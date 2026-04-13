@@ -255,7 +255,7 @@ cargo build -p google-workspace-cli --bin gws-executa
 
 `gws-executa` expects:
 
-- a credential named `GOOGLE_WORKSPACE_CLI_TOKEN` or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`
+- a credential named `GOOGLE_ACCESS_TOKEN` or `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`
 - an `argv` array that contains the `gws` arguments without shell quoting
 - an optional `cwd` string used as the file transport temp directory
 - no separately installed `gws` binary is required; the plugin embeds the `gws` runtime internally
@@ -281,7 +281,7 @@ Example `invoke` payload:
     },
     "context": {
       "credentials": {
-        "GOOGLE_WORKSPACE_CLI_TOKEN": "ya29..."
+        "GOOGLE_ACCESS_TOKEN": "ya29..."
       }
     }
   }
