@@ -14,6 +14,7 @@ const TOKEN_CREDENTIAL_NAME: &str = "GOOGLE_ACCESS_TOKEN";
 const INTERNAL_GWS_TOKEN_ENV: &str = "GOOGLE_WORKSPACE_CLI_TOKEN";
 const CREDENTIALS_FILE_CREDENTIAL_NAME: &str = "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE";
 const INTERNAL_MODE_ARG: &str = "__anna_run_gws_internal";
+const PLUGIN_VERSION: &str = "0.0.3";
 
 #[derive(Debug, Deserialize)]
 struct RpcRequest {
@@ -288,7 +289,7 @@ fn manifest() -> Value {
     json!({
         "name": PLUGIN_NAME,
         "display_name": PLUGIN_NAME,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": PLUGIN_VERSION,
         "description": "Single-file Anna Executa wrapper with embedded gws runtime.",
         "author": "googleworkspace/cli",
         "credentials": [
