@@ -14,7 +14,7 @@ const TOKEN_CREDENTIAL_NAME: &str = "GOOGLE_ACCESS_TOKEN";
 const INTERNAL_GWS_TOKEN_ENV: &str = "GOOGLE_WORKSPACE_CLI_TOKEN";
 const CREDENTIALS_FILE_CREDENTIAL_NAME: &str = "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE";
 const INTERNAL_MODE_ARG: &str = "__anna_run_gws_internal";
-const PLUGIN_VERSION: &str = "0.0.3";
+const PLUGIN_VERSION: &str = "1.0.0";
 
 #[derive(Debug, Deserialize)]
 struct RpcRequest {
