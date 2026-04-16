@@ -13,8 +13,22 @@ const PLUGIN_NAME: &str = "gws-executa";
 const TOKEN_CREDENTIAL_NAME: &str = "GOOGLE_ACCESS_TOKEN";
 const INTERNAL_GWS_TOKEN_ENV: &str = "GOOGLE_WORKSPACE_CLI_TOKEN";
 const CREDENTIALS_FILE_CREDENTIAL_NAME: &str = "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE";
+const PROJECT_ID_ENV: &str = "GOOGLE_WORKSPACE_PROJECT_ID";
+const CONFIG_DIR_ENV: &str = "GOOGLE_WORKSPACE_CLI_CONFIG_DIR";
 const INTERNAL_MODE_ARG: &str = "__anna_run_gws_internal";
 const PLUGIN_VERSION: &str = "1.0.0";
+const PROJECT_ID_ARG_NAME: &str = "project_id";
+const ISOLATED_CHILD_ENV_REMOVE: &[&str] = &[
+    INTERNAL_GWS_TOKEN_ENV,
+    CREDENTIALS_FILE_CREDENTIAL_NAME,
+    PROJECT_ID_ENV,
+    CONFIG_DIR_ENV,
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_WORKSPACE_CLI_CLIENT_ID",
+    "GOOGLE_WORKSPACE_CLI_CLIENT_SECRET",
+    "GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND",
+    "GOOGLE_WORKSPACE_CLI_LOG_FILE",
+];
 
 #[derive(Debug, Deserialize)]
 struct RpcRequest {
@@ -230,6 +244,11 @@ fn handle_invoke(id: Value, params: Value, current_exe: Option<&Path>) -> Respon
         Err(message) => return response_plan(error_response(id, -32602, message, None)),
     };
 
+    let project_id = match extract_project_id(&params.arguments) {
+        Ok(project_id) => project_id,
+        Err(message) => return response_plan(error_response(id, -32602, message, None)),
+    };
+
     let Some(current_exe) = current_exe else {
         return response_plan(error_response(
             id,
@@ -244,10 +263,16 @@ fn handle_invoke(id: Value, params: Value, current_exe: Option<&Path>) -> Respon
         Err(message) => return response_plan(error_response(id, -32602, message, None)),
     };
 
-    let resolved_credentials = match resolve_credential_env(&params.context.credentials) {
+    let mut resolved_credentials = match resolve_credential_env(&params.context.credentials) {
         Ok(credentials) => credentials,
         Err(message) => return response_plan(error_response(id, -32602, message, None)),
     };
+
+    if let Some(project_id) = project_id {
+        resolved_credentials
+            .env
+            .insert(PROJECT_ID_ENV, project_id.to_string());
+    }
 
     let output = match execute_embedded_gws(current_exe, &argv, &resolved_credentials.env) {
         Ok(output) => output,
@@ -321,6 +346,12 @@ fn manifest() -> Value {
                         "required": true
                     },
                     {
+                        "name": PROJECT_ID_ARG_NAME,
+                        "type": "string",
+                        "description": "Optional explicit GCP project ID forwarded as GOOGLE_WORKSPACE_PROJECT_ID. Embedded mode does not infer a project from local gws config files.",
+                        "required": false
+                    },
+                    {
                         "name": "cwd",
                         "type": "string",
                         "description": "Optional existing directory used for file transport temporary files. Defaults to the plugin binary directory.",
@@ -372,19 +403,44 @@ fn extract_cwd(arguments: &Map<String, Value>) -> Result<Option<&str>, String> {
     }
 }
 
+fn extract_project_id(arguments: &Map<String, Value>) -> Result<Option<&str>, String> {
+    match arguments.get(PROJECT_ID_ARG_NAME) {
+        None => Ok(None),
+        Some(value) => {
+            let project_id = value
+                .as_str()
+                .ok_or_else(|| format!("{PROJECT_ID_ARG_NAME} must be a string when provided"))?;
+            validate_text_input(PROJECT_ID_ARG_NAME, project_id)?;
+            Ok(Some(project_id))
+        }
+    }
+}
+
 fn validate_command_arg(arg: &str) -> Result<(), String> {
     if arg == INTERNAL_MODE_ARG {
         return Err("Reserved internal command argument is not allowed".to_string());
     }
 
-    if arg.chars().any(char::is_control) {
-        return Err("Command arguments must not contain control characters".to_string());
+    validate_text_input("Command arguments", arg)?;
+
+    Ok(())
+}
+
+fn validate_text_input(label: &str, value: &str) -> Result<(), String> {
+    if value.chars().any(char::is_control) {
+        return Err(format!("{label} must not contain control characters"));
+    }
+    if value.trim().is_empty() {
+        return Err(format!("{label} must not be empty"));
     }
 
     Ok(())
 }
 
-fn resolve_file_transport_dir(arguments: &Map<String, Value>, current_exe: &Path) -> Result<PathBuf, String> {
+fn resolve_file_transport_dir(
+    arguments: &Map<String, Value>,
+    current_exe: &Path,
+) -> Result<PathBuf, String> {
     if let Some(raw_cwd) = extract_cwd(arguments)? {
         let path = PathBuf::from(raw_cwd);
         if !path.exists() {
@@ -425,10 +481,25 @@ fn resolve_credential_env(
         resolved.sources.push(CREDENTIALS_FILE_CREDENTIAL_NAME);
     }
 
-    if resolved.env.is_empty()
-        && std::env::var_os(INTERNAL_GWS_TOKEN_ENV).is_none()
-        && std::env::var_os(CREDENTIALS_FILE_CREDENTIAL_NAME).is_none()
-    {
+    if !resolved.env.contains_key(INTERNAL_GWS_TOKEN_ENV) {
+        if let Ok(token) = std::env::var(INTERNAL_GWS_TOKEN_ENV) {
+            if !token.trim().is_empty() {
+                resolved.env.insert(INTERNAL_GWS_TOKEN_ENV, token);
+                resolved.sources.push(INTERNAL_GWS_TOKEN_ENV);
+            }
+        }
+    }
+
+    if !resolved.env.contains_key(CREDENTIALS_FILE_CREDENTIAL_NAME) {
+        if let Ok(path) = std::env::var(CREDENTIALS_FILE_CREDENTIAL_NAME) {
+            if !path.trim().is_empty() {
+                resolved.env.insert(CREDENTIALS_FILE_CREDENTIAL_NAME, path);
+                resolved.sources.push(CREDENTIALS_FILE_CREDENTIAL_NAME);
+            }
+        }
+    }
+
+    if resolved.env.is_empty() {
         return Err(format!(
             "One of '{}' or '{}' must be provided in context.credentials or environment",
             TOKEN_CREDENTIAL_NAME, CREDENTIALS_FILE_CREDENTIAL_NAME
@@ -478,11 +549,22 @@ fn build_embedded_gws_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    for key in ISOLATED_CHILD_ENV_REMOVE {
+        command.env_remove(key);
+    }
+
+    command.env(google_workspace_cli::ISOLATED_MODE_ENV, "1");
+    command.env(CONFIG_DIR_ENV, isolated_config_dir());
+
     for (key, value) in credential_env {
         command.env(key, value);
     }
 
     command
+}
+
+fn isolated_config_dir() -> PathBuf {
+    std::env::temp_dir().join(PLUGIN_NAME).join("config")
 }
 
 fn build_tool_data(
@@ -623,7 +705,12 @@ fn success_response(id: Value, result: Value) -> RpcResponse {
     }
 }
 
-fn error_response(id: Value, code: i32, message: impl Into<String>, data: Option<Value>) -> RpcResponse {
+fn error_response(
+    id: Value,
+    code: i32,
+    message: impl Into<String>,
+    data: Option<Value>,
+) -> RpcResponse {
     RpcResponse {
         jsonrpc: "2.0",
         id,
@@ -709,7 +796,11 @@ mod tests {
                 .get_args()
                 .map(|arg| arg.to_string_lossy().to_string())
                 .collect::<Vec<_>>(),
-            vec![INTERNAL_MODE_ARG.to_string(), "drive".to_string(), "files".to_string()]
+            vec![
+                INTERNAL_MODE_ARG.to_string(),
+                "drive".to_string(),
+                "files".to_string()
+            ]
         );
         assert_eq!(
             command
@@ -718,6 +809,29 @@ mod tests {
                 .and_then(|(_, value)| value)
                 .map(|value| value.to_string_lossy().to_string()),
             Some("token-123".to_string())
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == OsStr::new(google_workspace_cli::ISOLATED_MODE_ENV))
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().to_string()),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == OsStr::new(CONFIG_DIR_ENV))
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().to_string()),
+            Some(isolated_config_dir().display().to_string())
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == OsStr::new("GOOGLE_APPLICATION_CREDENTIALS"))
+                .map(|(_, value)| value.is_none()),
+            Some(true)
         );
     }
 
@@ -818,7 +932,8 @@ mod tests {
 
     #[test]
     fn resolve_credential_env_maps_google_access_token_to_internal_gws_env() {
-        let credentials = HashMap::from([(TOKEN_CREDENTIAL_NAME.to_string(), "token-123".to_string())]);
+        let credentials =
+            HashMap::from([(TOKEN_CREDENTIAL_NAME.to_string(), "token-123".to_string())]);
 
         let env = resolve_credential_env(&credentials).unwrap();
         assert_eq!(
@@ -826,6 +941,21 @@ mod tests {
             Some(&"token-123".to_string())
         );
         assert_eq!(env.sources, vec![TOKEN_CREDENTIAL_NAME]);
+    }
+
+    #[test]
+    fn resolve_credential_env_uses_ambient_internal_env_when_context_missing() {
+        std::env::set_var(INTERNAL_GWS_TOKEN_ENV, "ambient-token");
+
+        let env = resolve_credential_env(&HashMap::new()).unwrap();
+
+        assert_eq!(
+            env.env.get(INTERNAL_GWS_TOKEN_ENV),
+            Some(&"ambient-token".to_string())
+        );
+        assert_eq!(env.sources, vec![INTERNAL_GWS_TOKEN_ENV]);
+
+        std::env::remove_var(INTERNAL_GWS_TOKEN_ENV);
     }
 
     #[test]
@@ -839,6 +969,30 @@ mod tests {
     }
 
     #[test]
+    fn extract_project_id_accepts_string_input() {
+        let arguments = serde_json::from_value::<Map<String, Value>>(json!({
+            PROJECT_ID_ARG_NAME: "anna-project"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            extract_project_id(&arguments).unwrap(),
+            Some("anna-project")
+        );
+    }
+
+    #[test]
+    fn extract_project_id_rejects_control_characters() {
+        let arguments = serde_json::from_value::<Map<String, Value>>(json!({
+            PROJECT_ID_ARG_NAME: "anna\nproject"
+        }))
+        .unwrap();
+
+        let err = extract_project_id(&arguments).unwrap_err();
+        assert!(err.contains("control characters"));
+    }
+
+    #[test]
     fn resolve_file_transport_dir_uses_cwd_argument() {
         let dir = tempdir().unwrap();
         let arguments = serde_json::from_value::<Map<String, Value>>(json!({
@@ -847,7 +1001,8 @@ mod tests {
         }))
         .unwrap();
 
-        let resolved = resolve_file_transport_dir(&arguments, Path::new("/tmp/gws-executa")).unwrap();
+        let resolved =
+            resolve_file_transport_dir(&arguments, Path::new("/tmp/gws-executa")).unwrap();
         assert_eq!(resolved, dir.path());
     }
 
@@ -858,7 +1013,10 @@ mod tests {
 
         send_response(&response, Some(dir.path()), FileTransportMode::Always).unwrap();
 
-        let entries = fs::read_dir(dir.path()).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        let entries = fs::read_dir(dir.path())
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert_eq!(entries.len(), 1);
         let content = fs::read_to_string(entries[0].path()).unwrap();
         assert!(content.contains("\"jsonrpc\":\"2.0\""));

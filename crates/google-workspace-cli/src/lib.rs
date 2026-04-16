@@ -47,12 +47,25 @@ pub(crate) mod validate;
 
 pub use error::{print_error_json, GwsError};
 
+pub const ISOLATED_MODE_ENV: &str = "GOOGLE_WORKSPACE_CLI_ISOLATED";
+
 static PROCESS_INIT: Once = Once::new();
+
+pub fn is_isolated_mode() -> bool {
+    std::env::var(ISOLATED_MODE_ENV)
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
 
 pub fn initialize_process() {
     PROCESS_INIT.call_once(|| {
-        // Load .env file if present (silently ignored if missing)
-        let _ = dotenvy::dotenv();
+        if !is_isolated_mode() {
+            // Load .env file if present (silently ignored if missing)
+            let _ = dotenvy::dotenv();
+        }
 
         // Initialize structured logging (no-op if env vars are unset)
         logging::init_logging();
@@ -69,7 +82,6 @@ pub async fn run_cli_entry() {
 }
 
 pub async fn run_cli_with_args(args: Vec<String>) -> Result<(), GwsError> {
-
     if args.len() < 2 {
         print_usage();
         return Err(GwsError::Validation(

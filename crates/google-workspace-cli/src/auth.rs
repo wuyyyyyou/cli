@@ -86,12 +86,18 @@ async fn refresh_token_with_reqwest(
 /// 1. `GOOGLE_WORKSPACE_PROJECT_ID` environment variable.
 /// 2. `project_id` from the OAuth client configuration (`client_secret.json`).
 /// 3. `quota_project_id` from Application Default Credentials (ADC).
+///
+/// In isolated mode, only the explicit `GOOGLE_WORKSPACE_PROJECT_ID` override is honored.
 pub fn get_quota_project() -> Option<String> {
     // 1. Explicit environment variable (highest priority)
     if let Ok(project_id) = std::env::var("GOOGLE_WORKSPACE_PROJECT_ID") {
         if !project_id.is_empty() {
             return Some(project_id);
         }
+    }
+
+    if crate::is_isolated_mode() {
+        return None;
     }
 
     // 2. Project ID from the OAuth client configuration (set via `gws auth setup`)
@@ -348,6 +354,12 @@ async fn load_credentials_inner(
         }
         anyhow::bail!(
             "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE points to {path}, but file does not exist"
+        );
+    }
+
+    if crate::is_isolated_mode() {
+        anyhow::bail!(
+            "No credentials found. In isolated mode, provide GOOGLE_WORKSPACE_CLI_TOKEN or GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE."
         );
     }
 
@@ -991,5 +1003,66 @@ mod tests {
         let _config_guard = EnvVarGuard::remove("GOOGLE_WORKSPACE_CLI_CONFIG_DIR");
 
         assert_eq!(get_quota_project(), Some("my-project-123".to_string()));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_load_credentials_isolated_mode_rejects_default_fallbacks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default_path = tmp.path().join("credentials.json");
+        std::fs::write(
+            &default_path,
+            r#"{
+                "client_id": "default_id",
+                "client_secret": "default_secret",
+                "refresh_token": "default_refresh",
+                "type": "authorized_user"
+            }"#,
+        )
+        .unwrap();
+
+        let _isolated_guard = EnvVarGuard::set(crate::ISOLATED_MODE_ENV, "1");
+
+        let err = load_credentials_inner(None, &tmp.path().join("credentials.enc"), &default_path)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("isolated mode"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_get_quota_project_isolated_mode_ignores_local_config_and_adc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let adc_dir = tmp.path().join(".config").join("gcloud");
+        std::fs::create_dir_all(&adc_dir).unwrap();
+        std::fs::write(
+            adc_dir.join("application_default_credentials.json"),
+            r#"{"quota_project_id": "adc-project"}"#,
+        )
+        .unwrap();
+
+        let config_dir = tempfile::tempdir().unwrap();
+        let _config_guard = EnvVarGuard::set(
+            "GOOGLE_WORKSPACE_CLI_CONFIG_DIR",
+            config_dir.path().to_str().unwrap(),
+        );
+        let _home_guard = EnvVarGuard::set("HOME", tmp.path());
+        let _env_guard = EnvVarGuard::remove("GOOGLE_WORKSPACE_PROJECT_ID");
+        let _adc_guard = EnvVarGuard::remove("GOOGLE_APPLICATION_CREDENTIALS");
+        let _isolated_guard = EnvVarGuard::set(crate::ISOLATED_MODE_ENV, "1");
+
+        crate::oauth_config::save_client_config("id", "secret", "config-project").unwrap();
+
+        assert_eq!(get_quota_project(), None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_get_quota_project_isolated_mode_honors_explicit_override() {
+        let _env_guard = EnvVarGuard::set("GOOGLE_WORKSPACE_PROJECT_ID", "priority-env");
+        let _isolated_guard = EnvVarGuard::set(crate::ISOLATED_MODE_ENV, "1");
+
+        assert_eq!(get_quota_project(), Some("priority-env".to_string()));
     }
 }
