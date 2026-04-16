@@ -16,7 +16,7 @@ const CREDENTIALS_FILE_CREDENTIAL_NAME: &str = "GOOGLE_WORKSPACE_CLI_CREDENTIALS
 const PROJECT_ID_ENV: &str = "GOOGLE_WORKSPACE_PROJECT_ID";
 const CONFIG_DIR_ENV: &str = "GOOGLE_WORKSPACE_CLI_CONFIG_DIR";
 const INTERNAL_MODE_ARG: &str = "__anna_run_gws_internal";
-const PLUGIN_VERSION: &str = "1.0.0";
+const PLUGIN_VERSION: &str = "1.0.1";
 const PROJECT_ID_ARG_NAME: &str = "project_id";
 const ISOLATED_CHILD_ENV_REMOVE: &[&str] = &[
     INTERNAL_GWS_TOKEN_ENV,
