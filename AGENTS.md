@@ -2,28 +2,66 @@
 
 ## Project Overview
 
-`gws` is a Rust CLI tool for interacting with Google Workspace APIs. It dynamically generates its command surface at runtime by parsing Google Discovery Service JSON documents.
+This repository is a Rust wrapper around the upstream [`googleworkspace/cli`](https://github.com/googleworkspace/cli) project.
+
+The core `gws` CLI is still the same dynamic Google Workspace client: it fetches Google Discovery documents at runtime and builds commands dynamically. This repository adds an Anna/Executa adapter layer so the CLI can be called safely by the ANNA agent through a JSON-RPC over stdio plugin protocol.
+
+When working in this repo, treat it as a **wrapper/adaptation project first**, not a fork that should diverge from upstream `gws` behavior without a clear reason.
 
 > [!IMPORTANT]
-> **Dynamic Discovery**: This project does NOT use generated Rust crates (e.g., `google-drive3`) for API interaction. Instead, it fetches the Discovery JSON at runtime and builds `clap` commands dynamically. When adding a new service, you only need to register it in `crates/google-workspace/src/services.rs` and verify the Discovery URL pattern in `crates/google-workspace/src/discovery.rs`. Do NOT add new crates to `Cargo.toml` for standard Google APIs.
+> **Default implementation strategy**: prefer reusing the embedded `gws` runtime and existing library/CLI code. Do not re-implement Google Workspace API behavior in the Executa wrapper unless the protocol boundary requires it.
+
+> [!IMPORTANT]
+> **Protocol source of truth**: Anna/Executa behavior must follow:
+> `.docs/protocol-spec.zh-CN.md`
+>
+> If local wrapper behavior and generic assumptions conflict, follow the protocol spec and the actual implementation in `crates/google-workspace-cli/src/gws_executa.rs`.
 
 > [!NOTE]
-> **Package Manager**: Use `pnpm` instead of `npm` for Node.js package management in this repository.
+> **Package manager**: use `pnpm` instead of `npm` for Node.js package management in this repository.
+
+## Primary Goals
+
+This repository has two deliverables:
+
+1. `gws`
+   - The upstream-style CLI for humans and agents
+2. `gws-executa`
+   - A single-binary Anna Executa plugin that exposes `gws` through JSON-RPC over stdio
+
+The wrapper is successful only if both remain coherent:
+
+- `gws` keeps its native CLI behavior
+- `gws-executa` translates Anna protocol requests into isolated embedded `gws` executions
+- protocol responses remain machine-safe for ANNA consumption
 
 ## Build & Test
 
-> [!IMPORTANT]
-> **Test Coverage**: The `codecov/patch` check requires that new or modified lines are covered by tests. When adding code, extract testable helper functions rather than embedding logic in `main`/`run` where it's hard to unit-test. Run `cargo test` locally and verify new branches are exercised.
+For normal Rust work:
 
 ```bash
-cargo build          # Build in dev mode
-cargo clippy -- -D warnings  # Lint check
-cargo test           # Run tests
+cargo build
+cargo test
+cargo clippy -- -D warnings
 ```
+
+For the Anna wrapper specifically:
+
+```bash
+cargo build -p google-workspace-cli --bin gws-executa
+cargo test -p google-workspace-cli gws_executa
+```
+
+If you need manual protocol verification, see:
+
+- `crates/google-workspace-cli/EXECUTA.md`
+
+> [!IMPORTANT]
+> Prefer targeted tests around the wrapper (`gws_executa.rs`) when changing protocol handling, credential forwarding, file transport, stdout/stderr behavior, or request validation.
 
 ## Changesets
 
-Every PR must include a changeset file. Create one at `.changeset/<descriptive-name>.md`:
+Every PR must include a changeset file at `.changeset/<descriptive-name>.md`:
 
 ```markdown
 ---
@@ -33,207 +71,260 @@ Every PR must include a changeset file. Create one at `.changeset/<descriptive-n
 Brief description of the change
 ```
 
-Use `patch` for fixes/chores, `minor` for new features, `major` for breaking changes. The CI policy check will fail without a changeset.
+Use:
+
+- `patch` for fixes, docs, chores, and wrapper-only adjustments
+- `minor` for new user-facing features or new helper capabilities
+- `major` for breaking CLI or protocol changes
 
 ## Architecture
 
-The CLI uses a **two-phase argument parsing** strategy:
+### Upstream core
 
-1. Parse argv to extract the service name (e.g., `drive`)
-2. Fetch the service's Discovery Document, build a dynamic `clap::Command` tree, then re-parse
+The base CLI still uses the upstream two-phase parsing model:
 
-### Workspace Layout
+1. Parse argv to identify the Google service
+2. Fetch the Discovery document
+3. Build the dynamic `clap::Command` tree
+4. Re-parse and execute
 
-The repository is a Cargo workspace with two crates:
+Do not replace this with handwritten per-API command trees.
 
-| Crate                          | Package                 | Purpose                                           |
-| ------------------------------ | ----------------------- | ------------------------------------------------- |
-| `crates/google-workspace/`     | `google-workspace`      | Publishable library — core types and helpers       |
-| `crates/google-workspace-cli/` | `google-workspace-cli`  | Binary crate — the `gws` CLI                       |
+### Anna wrapper layer
 
-#### Library (`crates/google-workspace/src/`)
+`gws-executa` is the adaptation layer for ANNA.
 
-| File             | Purpose                                                    |
-| ---------------- | ---------------------------------------------------------- |
-| `discovery.rs`   | Serde models for Discovery Document + async fetch/cache    |
-| `services.rs`    | Service alias → Discovery API name/version mapping         |
-| `error.rs`       | `GwsError` enum, exit codes, JSON serialization            |
-| `validate.rs`    | Path/URL/resource validators, `encode_path_segment()`      |
-| `client.rs`      | HTTP client with retry logic                               |
+It:
 
-#### CLI (`crates/google-workspace-cli/src/`)
+- reads JSON-RPC 2.0 requests from `stdin`
+- writes protocol responses to `stdout`
+- writes logs/debug output to `stderr`
+- exposes `describe`, `health`, and `invoke`
+- currently exposes a single tool: `run_gws`
+- launches the same binary in an internal mode (`__anna_run_gws_internal`) to execute embedded `gws`
+- forwards credentials into the isolated child process via environment variables
+- always uses file transport for `invoke` responses
 
-| File                | Purpose                                                                  |
-| ------------------- | ------------------------------------------------------------------------ |
-| `main.rs`           | Entrypoint, two-phase CLI parsing, method resolution                     |
-| `auth.rs`           | OAuth2 token acquisition via env vars, encrypted credentials, or ADC     |
-| `credential_store.rs` | AES-256-GCM encryption/decryption of credential files                  |
-| `auth_commands.rs`  | `gws auth` subcommands: `login`, `logout`, `setup`, `status`, `export`   |
-| `commands.rs`       | Recursive `clap::Command` builder from Discovery resources               |
-| `executor.rs`       | HTTP request construction, response handling, schema validation          |
-| `schema.rs`         | `gws schema` command — introspect API method schemas                     |
-| `logging.rs`        | Opt-in structured logging (stderr + file) via `tracing`                  |
-| `timezone.rs`       | Account timezone resolution: `--timezone` flag, Calendar Settings API    |
+### Protocol invariants
 
-## Demo Videos
+These are non-negotiable when modifying the wrapper:
 
-Demo recordings are generated with [VHS](https://github.com/charmbracelet/vhs) (`.tape` files).
+1. `stdout` must contain protocol JSON only
+2. each protocol message must be a single line
+3. logs/debug output belong on `stderr`, never `stdout`
+4. the wrapper must speak JSON-RPC 2.0 over stdio
+5. manifest/tool schemas must stay compatible with the Anna/Executa protocol
+6. array parameters must declare `items` type information
 
-```bash
-vhs docs/demo.tape
-```
+If you accidentally print human-readable text to `stdout` in wrapper mode, you are breaking the protocol.
 
-### VHS quoting rules
+### File transport
 
-- Use **double quotes** for simple strings: `Type "gws --help" Enter`
-- Use **backtick quotes** when the typed text contains JSON with double quotes:
-  ```
-  Type `gws drive files list --params '{"pageSize":5}'` Enter
-  ```
-  `\"` escapes inside double-quoted `Type` strings are **not supported** by VHS and will cause parse errors.
+The current wrapper design uses file transport for `invoke`:
 
-### Scene art
+- `describe` and `health` may return directly on `stdout`
+- `invoke` returns a JSON pointer containing `__file_transport`
+- the actual response payload is written to a temp JSON file
+- `arguments.cwd` may override the temp file directory
+- otherwise the plugin binary directory is used
 
-ASCII art title cards live in `art/`. The `scripts/show-art.sh` helper clears the screen and cats the file. Portrait scenes use `scene*.txt`; landscape chapters use `long-*.txt`.
+When changing transport behavior, update both:
+
+- `crates/google-workspace-cli/src/gws_executa.rs`
+- `crates/google-workspace-cli/EXECUTA.md`
+
+## Workspace Layout
+
+| Path | Purpose |
+| --- | --- |
+| `crates/google-workspace/` | Publishable library with Discovery models, shared client, validation, and service registry |
+| `crates/google-workspace-cli/` | Main CLI crate containing `gws`, auth flows, helpers, and `gws-executa` |
+
+### Important files
+
+#### Upstream/shared behavior
+
+| File | Purpose |
+| --- | --- |
+| `crates/google-workspace/src/discovery.rs` | Discovery document fetch/cache models |
+| `crates/google-workspace/src/services.rs` | service alias to API name/version mapping |
+| `crates/google-workspace/src/validate.rs` | shared validation helpers |
+| `crates/google-workspace/src/client.rs` | shared HTTP client logic |
+
+#### Native CLI behavior
+
+| File | Purpose |
+| --- | --- |
+| `crates/google-workspace-cli/src/main.rs` | native `gws` entrypoint |
+| `crates/google-workspace-cli/src/commands.rs` | dynamic clap command builder |
+| `crates/google-workspace-cli/src/executor.rs` | HTTP request execution |
+| `crates/google-workspace-cli/src/auth.rs` | credential loading |
+| `crates/google-workspace-cli/src/auth_commands.rs` | `gws auth` workflows |
+| `crates/google-workspace-cli/src/lib.rs` | shared CLI runtime wiring |
+
+#### Anna wrapper behavior
+
+| File | Purpose |
+| --- | --- |
+| `crates/google-workspace-cli/src/gws_executa.rs` | Executa protocol server, manifest, invoke handling, file transport |
+| `crates/google-workspace-cli/EXECUTA.md` | manual testing guide for `gws-executa` |
+| `.docs/protocol-spec.zh-CN.md` | Anna/Executa protocol specification |
+
+## Development Rules
+
+### 1. Reuse upstream `gws` behavior
+
+When the request is "support another Google API" or "change CLI behavior", prefer modifying:
+
+- `crates/google-workspace/`
+- shared CLI logic in `crates/google-workspace-cli/src/`
+
+Only change the wrapper when the problem is specifically about:
+
+- protocol compliance
+- ANNA tool schema
+- credential injection
+- isolated execution
+- file transport
+- machine-readable output boundaries
+
+### 2. Do not bypass the wrapper isolation model
+
+`gws-executa` intentionally runs the current executable in an internal mode and strips/controls environment variables before invoking embedded `gws`.
+
+Preserve these properties:
+
+- isolated child environment
+- explicit credential forwarding
+- predictable config directory behavior
+- no accidental inheritance of unrelated local auth state unless explicitly intended
+
+### 3. Treat ANNA inputs as untrusted
+
+This repository is explicitly designed for agent invocation. Continue to validate:
+
+- `argv` entries
+- `cwd`
+- project/resource identifiers
+- file paths
+- text fields that flow into URLs, filesystem paths, or subprocess arguments
+
+Reject:
+
+- control characters
+- reserved internal arguments
+- malformed JSON-RPC payloads
+- invalid directory arguments
+
+### 4. Preserve machine-readable output
+
+For wrapper work:
+
+- never add plain `println!` output in RPC mode unless it is the actual JSON-RPC payload
+- prefer structured JSON objects for success/error data
+- include enough error context for ANNA to diagnose failures without scraping prose
+
+### 5. Keep tool schemas explicit
+
+When adding or modifying tools in the manifest:
+
+- keep parameter names stable unless there is a strong migration reason
+- provide `items` for array parameters
+- keep credentials in `credentials`, not in tool parameters
+- ensure descriptions are clear for both humans and LLM tool selection
 
 ## Input Validation & URL Safety
 
-> [!IMPORTANT]
-> This CLI is frequently invoked by AI/LLM agents. Always assume inputs can be adversarial — validate paths against traversal (`../../.ssh`), restrict format strings to allowlists, reject control characters, and encode user values before embedding them in URLs.
+The upstream validation rules still apply. In particular:
 
-> [!NOTE]
-> **Environment variables are trusted inputs.** The validation rules above apply to **CLI arguments** that may be passed by untrusted AI agents. Environment variables (e.g. `GOOGLE_WORKSPACE_CLI_CONFIG_DIR`) are set by the user themselves — in their shell profile, `.env` file, or deployment config — and are not subject to path traversal validation. This is consistent with standard conventions like `XDG_CONFIG_HOME`, `CARGO_HOME`, etc.
+1. file paths must use shared validation helpers where applicable
+2. user values embedded in URL path segments must be percent-encoded
+3. query parameters should use reqwest `.query()`
+4. resource identifiers should be validated before interpolation
+5. new validation should include both allow and reject-path tests
 
-### Path Safety (`crates/google-workspace/src/validate.rs`)
+Relevant files:
 
-When adding new helpers or CLI flags that accept file paths, **always validate** using the shared helpers:
+- `crates/google-workspace/src/validate.rs`
+- `crates/google-workspace-cli/src/validate.rs`
+- `crates/google-workspace-cli/src/helpers/mod.rs`
 
-| Scenario                               | Validator                                | Rejects                                                              |
-| -------------------------------------- | ---------------------------------------- | -------------------------------------------------------------------- |
-| File path for writing (`--output-dir`) | `validate::validate_safe_output_dir()`   | Absolute paths, `../` traversal, symlinks outside CWD, control chars |
-| File path for reading (`--dir`)        | `validate::validate_safe_dir_path()`     | Absolute paths, `../` traversal, symlinks outside CWD, control chars |
-| Enum/allowlist values (`--msg-format`) | clap `value_parser` (see `gmail/mod.rs`) | Any value not in the allowlist                                       |
+## Credentials
 
-```rust
-// In your argument parser:
-if let Some(output_dir) = matches.get_one::<String>("output-dir") {
-    crate::validate::validate_safe_output_dir(output_dir)?;
-    builder.output_dir(Some(output_dir.clone()));
-}
+For Anna/Executa integration, the wrapper currently supports credentials through `context.credentials`:
+
+- `GOOGLE_ACCESS_TOKEN`
+  - forwarded internally as `GOOGLE_WORKSPACE_CLI_TOKEN`
+- `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`
+  - forwarded as-is
+
+The wrapper may also fall back to matching environment variables for local development, but protocol-facing integrations should prefer `context.credentials`.
+
+Do not expose secret values in:
+
+- stdout payload summaries
+- debug logs
+- test snapshots
+- docs examples unless explicitly redacted/fake
+
+## Common Change Patterns
+
+### Add or modify a Google API surface
+
+Usually change:
+
+- `crates/google-workspace/src/services.rs`
+- `crates/google-workspace/src/discovery.rs`
+- possibly CLI helpers/docs if there is extra wrapper behavior
+
+Usually do **not** add a new Google API-specific Rust crate.
+
+### Add or modify Anna tool behavior
+
+Usually change:
+
+- `crates/google-workspace-cli/src/gws_executa.rs`
+- `crates/google-workspace-cli/EXECUTA.md`
+- relevant tests in `gws_executa.rs`
+
+### Add a new helper command
+
+Follow the existing helper guidance:
+
+- do not wrap a single API call that Discovery already exposes
+- helpers should provide orchestration, translation, or multi-step value
+- protocol changes should not be mixed unnecessarily with helper logic
+
+## Review Checklist
+
+Before finishing a change, verify:
+
+1. Did the change preserve upstream `gws` behavior unless wrapper adaptation required otherwise?
+2. Did `gws-executa` remain JSON-RPC clean on `stdout`?
+3. Are logs still on `stderr` only?
+4. Are tool schemas and credential declarations still protocol-compliant?
+5. Did we keep array parameter `items` declarations where needed?
+6. Did we preserve input validation for agent-controlled inputs?
+7. If transport behavior changed, did we update `EXECUTA.md` and related tests?
+
+## Useful Commands
+
+```bash
+# Build native CLI
+cargo build -p google-workspace-cli --bin gws
+
+# Build Anna wrapper
+cargo build -p google-workspace-cli --bin gws-executa
+
+# Run wrapper-focused tests
+cargo test -p google-workspace-cli gws_executa
+
+# Manual protocol smoke test
+echo '{"jsonrpc":"2.0","method":"describe","id":1}' | target/debug/gws-executa
 ```
 
-### URL Encoding (`crates/google-workspace-cli/src/helpers/mod.rs`)
+## References
 
-User-supplied values embedded in URL **path segments** must be percent-encoded. Use the shared helper:
-
-```rust
-// CORRECT — encodes slashes, spaces, and special characters
-let url = format!(
-    "https://www.googleapis.com/drive/v3/files/{}",
-    crate::helpers::encode_path_segment(file_id),
-);
-
-// WRONG — raw user input in URL path
-let url = format!("https://www.googleapis.com/drive/v3/files/{}", file_id);
-```
-
-For **query parameters**, use reqwest's `.query()` builder which handles encoding automatically:
-
-```rust
-// CORRECT — reqwest encodes query values
-client.get(url).query(&[("q", user_query)]).send().await?;
-
-// WRONG — manual string interpolation in query strings
-let url = format!("{}?q={}", base_url, user_query);
-```
-
-### Resource Name Validation (`crates/google-workspace-cli/src/helpers/mod.rs`)
-
-When a user-supplied string is used as a GCP resource identifier (project ID, topic name, space name, etc.) that gets embedded in a URL path, validate it first:
-
-```rust
-// Validates the string does not contain path traversal segments (`..`), control characters, or URL-breaking characters like `?` and `#`.
-let project = crate::validate::validate_resource_name(&project_id)?;
-let url = format!("https://pubsub.googleapis.com/v1/projects/{}/topics/my-topic", project);
-```
-
-This prevents injection of query parameters, path traversal, or other malicious payloads through resource name arguments like `--project` or `--space`.
-
-### Checklist for New Features
-
-When adding a new helper or CLI command:
-
-1. **File paths** → Use `validate_safe_output_dir` / `validate_safe_dir_path`
-2. **Enum flags** → Constrain via clap `value_parser` or `validate_msg_format`
-3. **URL path segments** → Use `encode_path_segment()`
-4. **Query parameters** → Use reqwest `.query()` builder
-5. **Resource names** (project IDs, space names, topic names) → Use `validate_resource_name()`
-6. **Write tests** for both the happy path AND the rejection path (e.g., pass `../../.ssh` and assert `Err`)
-
-## PR Labels
-
-Use these labels to categorize pull requests and issues:
-
-- `area: discovery` — Discovery document fetching, caching, parsing
-- `area: http` — Request execution, URL building, response handling
-- `area: docs` — README, contributing guides, documentation
-- `area: tui` — Setup wizard, picker, input fields
-- `area: distribution` — Nix flake, npm packaging, GitHub Actions release workflow, install methods
-- `area: auth` — OAuth, credentials, multi-account, ADC
-- `area: skills` — AI skill generation and management
-
-## Helper Commands (`+verb`)
-
-Helpers are handwritten commands prefixed with `+` that provide value the schema-driven Discovery commands cannot: multi-step orchestration, format translation (e.g., Markdown → Docs JSON), or multi-API composition.
-
-> [!IMPORTANT]
-> **Do NOT add a helper that** wraps a single API call already available via Discovery, adds flags to expose data already in the API response, or re-implements Discovery parameters as custom flags. Helper flags must control orchestration logic — use `--params` and `--format`/`jq` for API parameters and output filtering.
-
-See [`src/helpers/README.md`](crates/google-workspace-cli/src/helpers/README.md) for full guidelines, anti-patterns, and a checklist for new helpers.
-
-## Environment Variables
-
-### Authentication
-
-| Variable | Description |
-|---|---|
-| `GOOGLE_WORKSPACE_CLI_TOKEN` | Pre-obtained OAuth2 access token (highest priority; bypasses all credential file loading) |
-| `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` | Path to OAuth credentials JSON (no default; if unset, falls back to encrypted credentials in `~/.config/gws/`) |
-| `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND` | Keyring backend: `keyring` (default, uses OS keyring with file fallback) or `file` (file only, for Docker/CI/headless) |
-
-| `GOOGLE_APPLICATION_CREDENTIALS` | Standard Google ADC path; used as fallback when no gws-specific credentials are configured |
-
-### Configuration
-
-| Variable | Description |
-|---|---|
-| `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` | Override the config directory (default: `~/.config/gws`) |
-
-### OAuth Client
-
-| Variable | Description |
-|---|---|
-| `GOOGLE_WORKSPACE_CLI_CLIENT_ID` | OAuth client ID (for `gws auth login` when no `client_secret.json` is saved) |
-| `GOOGLE_WORKSPACE_CLI_CLIENT_SECRET` | OAuth client secret (paired with `CLIENT_ID` above) |
-
-### Sanitization (Model Armor)
-
-| Variable | Description |
-|---|---|
-| `GOOGLE_WORKSPACE_CLI_SANITIZE_TEMPLATE` | Default Model Armor template (overridden by `--sanitize` flag) |
-| `GOOGLE_WORKSPACE_CLI_SANITIZE_MODE` | `warn` (default) or `block` |
-
-### Helpers
-
-| Variable | Description |
-|---|---|
-| `GOOGLE_WORKSPACE_PROJECT_ID` | GCP project ID override for quota/billing and fallback for helper commands (overridden by `--project` flag) |
-
-### Logging
-
-| Variable | Description |
-|---|---|
-| `GOOGLE_WORKSPACE_CLI_LOG` | Log level filter for stderr output (e.g., `gws=debug`). Off by default. |
-| `GOOGLE_WORKSPACE_CLI_LOG_FILE` | Directory for JSON-line log files with daily rotation. Off by default. |
-
-All variables can also live in a `.env` file (loaded via `dotenvy`).
+- Upstream project: `https://github.com/googleworkspace/cli`
+- Anna protocol spec: `.docs/protocol-spec.zh-CN.md`
+- Wrapper manual test guide: `crates/google-workspace-cli/EXECUTA.md`
