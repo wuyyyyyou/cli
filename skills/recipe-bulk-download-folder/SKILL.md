@@ -2,7 +2,7 @@
 name: recipe-bulk-download-folder
 description: "List and download all files from a Google Drive folder."
 metadata:
-  version: 0.22.5
+  version: 1.0.2
   openclaw:
     category: "recipe"
     domain: "productivity"

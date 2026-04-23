@@ -10,13 +10,14 @@ use serde_json::{json, Map, Value};
 const MAX_STDIO_MESSAGE_BYTES: usize = 512 * 1024;
 const TOOL_NAME: &str = "run_gws";
 const PLUGIN_NAME: &str = "gws-executa";
+const PLUGIN_MANIFEST_NAME: &str = "tool-lightvoss_5433-gws-executa-79m8n6pp";
 const TOKEN_CREDENTIAL_NAME: &str = "GOOGLE_ACCESS_TOKEN";
 const INTERNAL_GWS_TOKEN_ENV: &str = "GOOGLE_WORKSPACE_CLI_TOKEN";
 const CREDENTIALS_FILE_CREDENTIAL_NAME: &str = "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE";
 const PROJECT_ID_ENV: &str = "GOOGLE_WORKSPACE_PROJECT_ID";
 const CONFIG_DIR_ENV: &str = "GOOGLE_WORKSPACE_CLI_CONFIG_DIR";
 const INTERNAL_MODE_ARG: &str = "__anna_run_gws_internal";
-const PLUGIN_VERSION: &str = "1.0.1";
+const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROJECT_ID_ARG_NAME: &str = "project_id";
 const ISOLATED_CHILD_ENV_REMOVE: &[&str] = &[
     INTERNAL_GWS_TOKEN_ENV,
@@ -312,7 +313,7 @@ fn handle_invoke(id: Value, params: Value, current_exe: Option<&Path>) -> Respon
 
 fn manifest() -> Value {
     json!({
-        "name": PLUGIN_NAME,
+        "name": PLUGIN_MANIFEST_NAME,
         "display_name": PLUGIN_NAME,
         "version": PLUGIN_VERSION,
         "description": "Single-file Anna Executa wrapper with embedded gws runtime.",
@@ -859,6 +860,15 @@ mod tests {
         assert_eq!(data["exit_code"], json!(0));
         assert_eq!(data["embedded_cli"], json!(true));
         assert_eq!(data["credential_sources"], json!([TOKEN_CREDENTIAL_NAME]));
+    }
+
+    #[test]
+    fn manifest_reports_public_name_and_package_version() {
+        let plugin_manifest = manifest();
+
+        assert_eq!(plugin_manifest["name"], json!(PLUGIN_MANIFEST_NAME));
+        assert_eq!(plugin_manifest["display_name"], json!(PLUGIN_NAME));
+        assert_eq!(plugin_manifest["version"], json!(PLUGIN_VERSION));
     }
 
     #[test]

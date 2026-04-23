@@ -2,7 +2,7 @@
 name: gws-meet
 description: "Manage Google Meet conferences."
 metadata:
-  version: 0.22.5
+  version: 1.0.2
   openclaw:
     category: "productivity"
     requires:

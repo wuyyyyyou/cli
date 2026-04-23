@@ -1,7 +1,7 @@
 {
   "name": "@googleworkspace/cli",
   "description": "Google Workspace CLI — dynamic command surface from Discovery Service",
-  "version": "0.22.5",
+  "version": "1.0.2",
   "license": "Apache-2.0",
   "author": "Justin Poehnelt",
   "repository": {
