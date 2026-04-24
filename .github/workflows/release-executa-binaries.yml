@@ -51,6 +51,8 @@ jobs:
             archive_name: gws-executa-macos-amd64.tar.gz
             checksum_name: gws-executa-macos-amd64.tar.gz.sha256
             binary_name: gws-executa
+            entrypoint_keys: default
+            entrypoint_path: bin/gws-executa
             archive_type: tar.gz
           - runner: macos-15
             label: macos-arm64
@@ -58,6 +60,8 @@ jobs:
             archive_name: gws-executa-macos-arm64.tar.gz
             checksum_name: gws-executa-macos-arm64.tar.gz.sha256
             binary_name: gws-executa
+            entrypoint_keys: default
+            entrypoint_path: bin/gws-executa
             archive_type: tar.gz
           - runner: windows-latest
             label: windows-amd64
@@ -65,6 +69,8 @@ jobs:
             archive_name: gws-executa-windows-amd64.zip
             checksum_name: gws-executa-windows-amd64.zip.sha256
             binary_name: gws-executa.exe
+            entrypoint_keys: default,windows-x86_64
+            entrypoint_path: bin/gws-executa.exe
             archive_type: zip
 
     steps:
@@ -82,13 +88,59 @@ jobs:
         shell: bash
         run: bash crates/google-workspace-cli/build_binary.sh
 
+      - name: Read package version
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json, sys; data = json.load(sys.stdin); print(next(package["version"] for package in data["packages"] if package["name"] == "google-workspace-cli"))')
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Stage Executa plugin bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf staging
+          mkdir -p staging/bin staging/lib staging/data
+          cp "crates/google-workspace-cli/dist/${{ matrix.dist_file }}" "staging/bin/${{ matrix.binary_name }}"
+          chmod 755 "staging/bin/${{ matrix.binary_name }}"
+
+          python3 - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          binary_path = "${{ matrix.entrypoint_path }}"
+          entrypoint_keys = "${{ matrix.entrypoint_keys }}".split(",")
+          source = Path("crates/google-workspace-cli/src/gws_executa.rs").read_text(encoding="utf-8")
+          manifest_name = re.search(r'const PLUGIN_MANIFEST_NAME: &str = "([^"]+)";', source).group(1)
+          manifest = {
+              "name": manifest_name,
+              "version": "${{ steps.package.outputs.version }}",
+              "runtime": {
+                  "binary": {
+                      "entrypoint": {key: binary_path for key in entrypoint_keys},
+                      "lib_dirs": ["lib"],
+                      "data_dirs": ["data"],
+                      "permissions": {
+                          binary_path: "0o755",
+                      },
+                  },
+              },
+          }
+
+          Path("staging/manifest.json").write_text(
+              json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
       - name: Package (unix)
         if: matrix.archive_type == 'tar.gz'
         shell: bash
         run: |
-          mkdir -p staging
-          cp "crates/google-workspace-cli/dist/${{ matrix.dist_file }}" "staging/${{ matrix.binary_name }}"
-          cp LICENSE README.md "staging/"
           tar czf "${{ matrix.archive_name }}" -C staging .
           shasum -a 256 "${{ matrix.archive_name }}" > "${{ matrix.checksum_name }}"
 
@@ -96,9 +148,6 @@ jobs:
         if: matrix.archive_type == 'zip'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path staging | Out-Null
-          Copy-Item "crates/google-workspace-cli/dist/${{ matrix.dist_file }}" "staging/${{ matrix.binary_name }}"
-          Copy-Item LICENSE, README.md staging
           Compress-Archive -Path "staging/*" -DestinationPath "${{ matrix.archive_name }}" -Force
           (Get-FileHash "${{ matrix.archive_name }}" -Algorithm SHA256).Hash.ToLower() + "  ${{ matrix.archive_name }}" | Out-File -Encoding ascii "${{ matrix.checksum_name }}"
 
@@ -146,7 +195,7 @@ jobs:
             printf '%s\n' '- macOS arm64'
             printf '%s\n' '- Windows amd64'
             printf '\n'
-            printf '%s\n' 'Each asset includes the binary plus `LICENSE` and `README.md`.'
+            printf '%s\n' 'Each asset contains `bin/`, `lib/`, `data/`, and `manifest.json`.'
             printf '%s\n' 'SHA-256 checksum files are uploaded alongside each archive.'
           } > "$notes_file"
 
